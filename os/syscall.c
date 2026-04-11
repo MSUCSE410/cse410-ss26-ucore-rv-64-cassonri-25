@@ -34,7 +34,9 @@ uint64 sys_sched_yield()
 	yield();
 	return 0;
 }
-
+// useraddr bridges between user and kernel; gets virtual address and returns physical address
+// cannot access physical memory directly, only uses virtual;useraddr fixes this
+// task must access existing memory 
 uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofday in pagetable. (VA to PA)
 {
 	struct proc *p = curr_proc();
@@ -58,7 +60,7 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofd
 /*
 * LAB1: you may need to define sys_task_info here
 */
-
+// now allocates virtual address to physical address
 int sys_task_info(TaskInfo *ti) {
 	struct proc *p = curr_proc();
 	TaskInfo *pa_ti = (TaskInfo *)useraddr(p->pagetable, (uint64)ti);
@@ -113,7 +115,7 @@ void syscall()
 	case SYS_task_info:
 		ret = sys_task_info((TaskInfo *)args[0]);
 		break;
-		// ADD THESE TWO CASES BELOW
+		
     case 215: // sys_munmap
         ret = sys_munmap(args[0], args[1]);
         break;
@@ -127,47 +129,65 @@ void syscall()
 	trapframe->a0 = ret;
 	tracef("syscall ret %d", ret);
 }
+// reverses mmap to clean up resources;removes maps
+// checks that every page in range is actually map
+// task must create new memorry by allocating physical ram and linking it to a virtual address
+// allocating and deallocating
 uint64 sys_munmap(uint64 start, uint64 len) {
     if (len == 0) return 0;
     if (start % PAGE_SIZE != 0) return -1;
 
     struct proc *p = curr_proc();
+	// used to round up to end of page due to hardware needing 4096 byte increments
     uint64 end = PGROUNDUP(start + len);
 
-    // 1. Validation: All pages in the range MUST be currently mapped [cite: 57]
+    // 1. Validation: All pages in the range MUST be currently mapped
+	// if not mapped, error is returned
     for (uint64 va = start; va < end; va += PAGE_SIZE) {
         if (walkaddr(p->pagetable, va) == 0) return -1;
     }
 
-    // 2. Unmap and Free
-    // Your vm.c provides uvmunmap(pagetable, va, npages, do_free)
+    // unmaps and frees
     uint64 npages = (end - start) / PAGE_SIZE;
+	// clears the valid bit in the page table, passing the 1 as the last argument to tell the kernel to call kfree
+	// then returns that physical ram to free pool for other processes to use
     uvmunmap(p->pagetable, start, npages, 1); // '1' means free physical memory
     
     return 0;
 }
-
+// allows process to request a new "blank" chunk of memory
+// requests anonymous physical memory of length len bytes and maps it to virtual memory starting at addr and a memory page attribute of port
+// have virtual memory address, and maps to physical memory address
+// port bit 0-readable;bit1-writable;bit2-executable;other bits invalid(0)
+// give virtual memory addr and maps to physical memory addr
 uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd) {
+	// rejects requests 0 bytes or larger than 1 GiB
 	if (len == 0) return 0;
 	if (len > 1024 * 1024 * 1024) return -1;
 	if ((port & ~0x7) != 0 || (port & 0x7) == 0) return -1;
+	// start address must be page aligned due to hardware mapping working on a per page basis
 	if (start % PAGE_SIZE != 0) return -1;
 	struct proc *p = curr_proc();
     uint64 end = PGROUNDUP(start + len);
+	// walkaddr used to traverse page table levels to find physical page number
+	// loops through requested range using walkaddr to ensure virtual addresses arent being used somewhere else
     for (uint64 va = start; va < end; va += PAGE_SIZE) {
         if (walkaddr(p->pagetable, va) != 0) return -1;
     }
+	// if user bit not set, mem only accessible in kernel mode; will get blocked even if mapped
 	int pte_flags = PTE_U | (port << 1); 
-
+	// kalloc used by kernel to get physical frame of RAM
     for (uint64 va = start; va < end; va += PAGE_SIZE) {
+		// if kalloc fails, code calls munmap on pages it already succeeded in mapping to prevent memory leak
         void *pa = kalloc();
         if (pa == 0) {
-            // Insufficient physical memory: rollback and return -1 [cite: 47]
+            // Insufficient physical memory: rollback and return -1 
             sys_munmap(start, va - start);
             return -1;
         }
+		// zeroes out memory
 		memset(pa, 0, PAGE_SIZE); // Clean the "anonymous" memory
-        
+        // creates a page table entry
         if (mappages(p->pagetable, va, PAGE_SIZE, (uint64)pa, pte_flags) != 0) {
             kfree(pa);
             sys_munmap(start, va - start);
