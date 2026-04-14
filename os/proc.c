@@ -89,6 +89,13 @@ found:
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+	uint64 min_s = 0;
+	for(struct proc *tmp = pool; tmp < &pool[NPROC]; tmp++) {
+    	if(tmp->state == RUNNABLE && tmp->stride > min_s) min_s = tmp->stride;
+	}
+	p->priority = 16;
+	p->stride = min_s;
+	p->pass = (uint64)(0x1000000000000000L / 16);
 	return p;
 }
 
@@ -100,7 +107,22 @@ found:
 void scheduler()
 {
 	struct proc *p;
+	struct proc *best;
+	uint64 min_stride;
 	for (;;) {
+		best = NULL;
+		min_stride = -1ULL;
+        // 1. Scan the pool for the RUNNABLE process with the smallest stride
+        for (p = pool; p < &pool[NPROC]; p++) {
+            if (p->state == RUNNABLE) {
+                if (best == NULL || p->stride < best->stride) {
+                    best = p;
+				}
+				if (p->stride < min_stride) {
+					min_stride = p->stride;
+				}	
+			}	
+		}
 		/*int has_proc = 0;
 		for (p = pool; p < &pool[NPROC]; p++) {
 			if (p->state == RUNNABLE) {
@@ -114,14 +136,27 @@ void scheduler()
 		if(has_proc == 0) {
 			panic("all app are over!\n");
 		}*/
-		p = fetch_task();
-		if (p == NULL) {
-			panic("all app are over!\n");
+		// p = fetch_task();
+		if (best != NULL) {
+			if (min_stride > 0) {
+				for (struct proc *hp = pool; hp < &pool[NPROC]; hp++) {
+                    if (hp->state != UNUSED && hp->stride >= min_stride) {
+                        hp->stride -= min_stride;
+					}	
+				}	
+			}
+			best->state = RUNNING;
+			current_proc = best;
+			best->stride += best->pass;
+			swtch(&idle.context, &best->context);
+			current_proc = &idle;
+			//panic("all app are over!\n");
 		}
-		tracef("swtich to proc %d", p - pool);
-		p->state = RUNNING;
-		current_proc = p;
-		swtch(&idle.context, &p->context);
+		//tracef("swtich to proc %d", best - pool);
+		//p->state = RUNNING;
+		//current_proc = best;
+		//best->stride += best->pass;
+		//swtch(&idle.context, &p->context);
 	}
 }
 
@@ -144,7 +179,7 @@ void sched()
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
+	//add_task(current_proc);
 	sched();
 }
 
@@ -184,7 +219,7 @@ int fork()
 	np->trapframe->a0 = 0;
 	np->parent = p;
 	np->state = RUNNABLE;
-	add_task(np);
+	//add_task(np);
 	return np->pid;
 }
 
@@ -215,9 +250,11 @@ int wait(int pid, int *code)
 				havekids = 1;
 				if (np->state == ZOMBIE) {
 					// Found one.
-					np->state = UNUSED;
+					//np->state = UNUSED;
 					pid = np->pid;
 					*code = np->exit_code;
+					freeproc(np);
+					np->state = UNUSED;
 					return pid;
 				}
 			}
@@ -226,7 +263,8 @@ int wait(int pid, int *code)
 			return -1;
 		}
 		p->state = RUNNABLE;
-		add_task(p);
+		//p->stride += p->pass;
+		//add_task(p);
 		sched();
 	}
 }
@@ -237,17 +275,36 @@ void exit(int code)
 	struct proc *p = curr_proc();
 	p->exit_code = code;
 	debugf("proc %d exit with %d\n", p->pid, code);
-	freeproc(p);
+	//freeproc(p);
 	if (p->parent != NULL) {
 		// Parent should `wait`
 		p->state = ZOMBIE;
-	}
+	} else {
+		p->state = UNUSED;
+	}	
 	// Set the `parent` of all children to NULL
 	struct proc *np;
 	for (np = pool; np < &pool[NPROC]; np++) {
 		if (np->parent == p) {
 			np->parent = NULL;
+			if(np->state == ZOMBIE) np->state = UNUSED;
 		}
 	}
 	sched();
+}
+
+int spawn(char *name)
+{
+    int id = get_id_by_name(name); 
+    if (id < 0) return -1; 
+
+    struct proc *np = allocproc(); 
+    if (np == 0) return -1; 
+
+    loader(id, np); 
+    np->parent = curr_proc(); 
+    np->state = RUNNABLE;
+    //add_task(np); 
+    
+    return np->pid; 
 }

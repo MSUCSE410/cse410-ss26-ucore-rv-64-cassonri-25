@@ -5,6 +5,9 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
+int spawn(char *name);
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd);
+uint64 sys_munmap(uint64 start, uint64 len);
 
 uint64 sys_write(int fd, uint64 va, uint len)
 {
@@ -95,12 +98,19 @@ uint64 sys_wait(int pid, uint64 va)
 uint64 sys_spawn(uint64 va)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+	struct proc *p = curr_proc();
+	char name[200];
+	if (copyinstr(p->pagetable, name, va, 200) < 0) return -1;
+	return spawn(name);
 }
 
 uint64 sys_set_priority(long long prio){
     // TODO: your job is to complete the sys call
-    return -1;
+	if (prio < 2) return -1;
+	struct proc *p = curr_proc();
+	p->priority = prio;
+	p->pass = (uint64)(0x1000000000000000L / prio);	
+	return prio;	
 }
 
 
@@ -148,10 +158,65 @@ void syscall()
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
 		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
+		break;	
+	case 215: // sys_munmap
+        ret = sys_munmap(args[0], args[1]);
+        break;
+    case 222: // sys_mmap
+        ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+        break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
 	}
 	trapframe->a0 = ret;
 	tracef("syscall ret %d", ret);
+}
+uint64 sys_munmap(uint64 start, uint64 len) {
+    if (len == 0) return 0;
+    if (start % PAGE_SIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    uint64 end = PGROUNDUP(start + len);
+
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        if (walkaddr(p->pagetable, va) == 0) return -1;
+    }
+
+    uint64 npages = (end - start) / PAGE_SIZE;
+    uvmunmap(p->pagetable, start, npages, 1); 
+    
+    return 0;
+}
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd) {
+    if (len == 0) return 0;
+    if (len > 1024 * 1024 * 1024) return -1;
+    if ((port & ~0x7) != 0 || (port & 0x7) == 0) return -1;
+    if (start % PAGE_SIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    uint64 end = PGROUNDUP(start + len);
+
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        if (walkaddr(p->pagetable, va) != 0) return -1;
+    }
+
+    int pte_flags = PTE_U | (port << 1); 
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        void *pa = kalloc();
+        if (pa == 0) {
+            sys_munmap(start, va - start);
+            return -1;
+        }
+        memset(pa, 0, PAGE_SIZE);
+        if (mappages(p->pagetable, va, PAGE_SIZE, (uint64)pa, pte_flags) != 0) {
+            kfree(pa);
+            sys_munmap(start, va - start);
+            return -1;
+        }
+    }
+    return 0;
 }
