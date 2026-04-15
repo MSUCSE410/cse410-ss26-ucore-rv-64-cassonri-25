@@ -94,21 +94,35 @@ uint64 sys_wait(int pid, uint64 va)
 	int *code = (int *)useraddr(p->pagetable, va);
 	return wait(pid, code);
 }
-
+// creates a new process
+// equivalent to fork + exec, but slightly more optimal due to it not copying a memory space just to immedietly delete it
+// creates a new child process and executes the target program
+// returns process ID of the child is succesful, otherwise -1
+// atomic 
 uint64 sys_spawn(uint64 va)
 {
 	// TODO: your job is to complete the sys call
 	struct proc *p = curr_proc();
 	char name[200];
 	if (copyinstr(p->pagetable, name, va, 200) < 0) return -1;
+	// this is the atomic load
+	// calls the logic implemented in proc.c(allocproc) to allocate a slot
+	// also loader.c to fill it with the program binary in one go
 	return spawn(name);
 }
-
+// sets process priority
+// allows a user-space program to influence the scheduler
+// returns process id of the child if succesful
 uint64 sys_set_priority(long long prio){
     // TODO: your job is to complete the sys call
+	// the validation
+	// if priorities less than 2 could cause pass values that are too large or lead to division by 0 errors
 	if (prio < 2) return -1;
 	struct proc *p = curr_proc();
 	p->priority = prio;
+	// this is the dynamic update:
+	// we need to recalculate the pass value immediately so the process
+	// will start to receive the new "fair share" of the CPU immedietly
 	p->pass = (uint64)(0x1000000000000000L / prio);	
 	return prio;	
 }

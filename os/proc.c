@@ -74,7 +74,7 @@ struct proc *allocproc()
 		}
 	}
 	return 0;
-
+// initialize all the accounting variables anytime a process is born
 found:
 	// init proc
 	p->pid = allocpid();
@@ -90,6 +90,11 @@ found:
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
 	uint64 min_s = 0;
+	// This is the stride scheduling init
+	// we set the default a priority of 16
+	// pass is here to determine how much stride increases every time the proc will run
+	// initialize the stride to 0 or the system minimum, which is min_s in this case
+	// this is so the process will be eligible to immedietly run
 	for(struct proc *tmp = pool; tmp < &pool[NPROC]; tmp++) {
     	if(tmp->state == RUNNABLE && tmp->stride > min_s) min_s = tmp->stride;
 	}
@@ -104,6 +109,10 @@ found:
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+// The scheduler is the brain of the os
+// does not use a queue, but scans the pool for most deserving process - iterates
+// ignores anything that is not "RUNNABLE"
+// picks one with lowest stride
 void scheduler()
 {
 	struct proc *p;
@@ -111,6 +120,9 @@ void scheduler()
 	uint64 min_stride;
 	for (;;) {
 		best = NULL;
+		// this is the selection loop
+		// we iterate through the entire process pool to find the runnable process with the smallest stride value
+		// this "greedy choice will ensure fairness"
 		min_stride = -1ULL;
         // 1. Scan the pool for the RUNNABLE process with the smallest stride
         for (p = pool; p < &pool[NPROC]; p++) {
@@ -147,6 +159,9 @@ void scheduler()
 			}
 			best->state = RUNNING;
 			current_proc = best;
+			// this is the stride update
+			// before we switch to the process, we increment the stride by its pass value
+			// this will charge the process for its CPU time
 			best->stride += best->pass;
 			swtch(&idle.context, &best->context);
 			current_proc = &idle;
@@ -248,9 +263,14 @@ int wait(int pid, int *code)
 			if (np->state != UNUSED && np->parent == p &&
 			    (pid <= 0 || np->pid == pid)) {
 				havekids = 1;
+				// loop
 				if (np->state == ZOMBIE) {
 					// Found one.
 					//np->state = UNUSED;
+					// this is resource reclimation
+					// only place where freeproc is called
+					// with freeing of resources here, ensures that as soon as parent finishes
+					// witing, the process slot(NPROC) is actually available for new apps
 					pid = np->pid;
 					*code = np->exit_code;
 					freeproc(np);
@@ -276,6 +296,10 @@ void exit(int code)
 	p->exit_code = code;
 	debugf("proc %d exit with %d\n", p->pid, code);
 	//freeproc(p);
+	// this is the zombie transition
+	// dont free memory over here, the parent might need it still to read exit code
+	// we mark it as ZOMBIE so the scheduler will ignore it
+	// 'wait' is still able to find it
 	if (p->parent != NULL) {
 		// Parent should `wait`
 		p->state = ZOMBIE;
@@ -290,6 +314,7 @@ void exit(int code)
 			if(np->state == ZOMBIE) np->state = UNUSED;
 		}
 	}
+	// orphan handling
 	sched();
 }
 
