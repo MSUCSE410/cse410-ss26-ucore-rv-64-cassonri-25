@@ -96,6 +96,15 @@ found:
 	memset((void *)p->files, 0, sizeof(struct file *) * FD_BUFFER_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+
+	uint64 min_s = 0;
+	for(struct proc *tmp = pool; tmp < &pool[NPROC]; tmp++) {
+    	if(tmp->state == RUNNABLE && tmp->stride > min_s) min_s = tmp->stride;
+	}
+	p->priority = 16;
+	p->stride = min_s;
+	p->pass = (uint64)(0x1000000000000000L / 16);
+
 	return p;
 }
 
@@ -207,6 +216,9 @@ int fork()
 		if (p->files[i] != NULL) {
 			// TODO: f->type == STDIO ?
 			p->files[i]->ref++;
+			if(p->files[i]->ip != NULL) {
+                idup(p->files[i]->ip); 
+            }
 			np->files[i] = p->files[i];
 		}
 	}
@@ -267,7 +279,8 @@ int exec(char *path, char **argv)
 	}
 	uvmunmap(p->pagetable, 0, p->max_page, 1);
 	bin_loader(ip, p);
-	iput(ip);
+	//iput(ip);
+	iunlockput(ip);
 	return push_argv(p, argv);
 }
 
@@ -306,21 +319,34 @@ int wait(int pid, int *code)
 void exit(int code)
 {
 	struct proc *p = curr_proc();
+	int i;
+	// 1. Close all open files before anything else!
+    for(i = 0; i < FD_BUFFER_SIZE; i++){
+        if(p->files[i]){
+            // This function should eventually call iput()
+            fileclose(p->files[i]); 
+            p->files[i] = NULL;
+        }
+    }
 	p->exit_code = code;
 	debugf("proc %d exit with %d", p->pid, code);
-	freeproc(p);
+	//freeproc(p);
 	if (p->parent != NULL) {
 		// Parent should `wait`
 		p->state = ZOMBIE;
+	} else{
+		p->state = UNUSED;
 	}
 	// Set the `parent` of all children to NULL
 	struct proc *np;
 	for (np = pool; np < &pool[NPROC]; np++) {
 		if (np->parent == p) {
-			np->parent = NULL;
+			np->parent = &pool[0];
+			//np->parent = NULL;
 		}
 	}
 	sched();
+	panic("exit should never return");
 }
 
 int fdalloc(struct file *f)
@@ -335,4 +361,52 @@ int fdalloc(struct file *f)
 		}
 	}
 	return -1;
+}
+int spawn(char *name)
+{
+    struct inode *ip;
+    struct proc *np;
+
+    if ((ip = namei(name)) == 0) return -1;
+
+    if ((np = allocproc()) == 0) {
+        iput(ip);
+        return -1;
+    }
+
+    // Initialize/Clear the file table for the new process
+    for(int i = 0; i < FD_BUFFER_SIZE; i++) {
+        np->files[i] = NULL;
+    }
+	struct file *f = filealloc();
+    if (f != NULL) {
+        f->type = FD_STDIO;
+        f->readable = 1;
+        f->writable = 1;
+        
+        np->files[0] = f; 
+        
+        f->ref++;         // Increment for FD 1
+        np->files[1] = f; 
+        
+        f->ref++;         // Increment for FD 2
+        np->files[2] = f; 
+    }
+
+    // OPTIONAL: If your tests require stdout/stdin to be open by default
+    // struct file *stdio = console_file_alloc(); // or similar helper
+    // np->files[0] = idup_file(stdio);
+    // np->files[1] = idup_file(stdio);
+    // np->files[2] = idup_file(stdio);
+
+    bin_loader(ip, np);
+    iput(ip);
+
+    np->parent = curr_proc();
+    np->state = RUNNABLE;
+    
+    // Ensure the task is actually added to the scheduler!
+    add_task(np); 
+    
+    return np->pid;
 }

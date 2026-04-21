@@ -40,11 +40,23 @@ struct superblock {
 // File type
 #define T_DIR 1 // Directory
 #define T_FILE 2 // File
+#define DIR 0x040000
+#define FILE 0x10000
+
+typedef struct {
+    uint64 dev;     // drive number (set to 0) [cite: 66]
+    uint64 ino;     // inode number [cite: 66]
+    uint32 mode;    // file type (DIR or FILE) [cite: 67]
+    uint32 nlink;   // number of hard links [cite: 68]
+	uint64 size;
+    uint64 pad [7]; // for compatibility [cite: 69]
+} Stat;
 
 // On-disk inode structure
 struct dinode {
 	short type; // File type
-	short pad[3];
+	short nlink; // Number of links to inode in file system
+	short pad[2];
 	// LAB4: you can reduce size of pad array and add link count below,
 	//       or you can just regard a pad as link count.
 	//       But keep in mind that you'd better keep sizeof(dinode) unchanged
@@ -92,4 +104,5 @@ int readi(struct inode *, int, uint64, uint, uint);
 int writei(struct inode *, int, uint64, uint, uint);
 void itrunc(struct inode *);
 int dirls(struct inode *);
+struct inode* nameiparent(char*, char*);
 #endif //!__FS_H__

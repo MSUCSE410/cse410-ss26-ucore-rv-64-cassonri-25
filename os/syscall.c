@@ -5,7 +5,23 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
-
+#include "fs.h"
+#include "file.h"
+#include "types.h"
+#include "proc.h"
+#include "string.h"
+extern struct proc pool[NPROC];
+int spawn(char *name);
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd);
+uint64 sys_munmap(uint64 start, uint64 len);
+struct inode* namei(char*);
+struct inode* nameiparent(char*, char*);
+struct inode* dirlookup(struct inode*, char*, uint*);
+void ivalid(struct inode*);
+void iunlock(struct inode*);
+void iupdate(struct inode*);
+void iput(struct inode*);
+int dirlink(struct inode*, char*, uint);
 uint64 console_write(uint64 va, uint64 len)
 {
 	struct proc *p = curr_proc();
@@ -145,13 +161,22 @@ uint64 sys_wait(int pid, uint64 va)
 uint64 sys_spawn(uint64 va)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+struct proc *p = curr_proc();
+    char name[200];
+    if (copyinstr(p->pagetable, name, va, 200) < 0) return -1;
+
+    // Just call the helper; let the helper do the heavy lifting
+    return spawn(name);
 }
 
 uint64 sys_set_priority(long long prio)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+	if (prio < 2) return -1;
+	struct proc *p = curr_proc();
+	p->priority = prio;
+	p->pass = (uint64)(0x1000000000000000L / prio);	
+	return prio;	
 }
 
 uint64 sys_openat(uint64 va, uint64 omode, uint64 _flags)
@@ -179,17 +204,116 @@ uint64 sys_close(int fd)
 
 int sys_fstat(int fd,uint64 stat){
 	//TODO: your job is to complete the syscall
-	return -1;
+	struct file *f;
+    struct proc *p = curr_proc();
+    Stat st;
+
+    if(fd < 0 || fd >= NFILE || (f = p->files[fd]) == 0) return -1;
+
+    ivalid(f->ip); // Use ivalid instead of ilock
+    st.dev = 0;
+    st.ino = f->ip->inum;
+    st.nlink = f->ip->nlink;
+	st.size = f->ip->size;
+    st.mode = (f->ip->type == T_DIR) ? 0x040000 : 0x100000;
+    //iunlock(f->ip);
+
+    if(copyout(p->pagetable, stat, (char *)&st, sizeof(st)) < 0) return -1;
+    return 0;
 }
 
 int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint64 flags){
 	//TODO: your job is to complete the syscall
-	return -1;
+	char old_buf[MAXPATH], new_buf[MAXPATH]; // Use unique names for local buffers
+    struct inode *ip, *dp;
+    char name[DIRSIZ];
+    struct proc *p = curr_proc();
+
+    // Use the 'oldpath' and 'newpath' parameters directly [cite: 20, 21]
+    if(copyinstr(p->pagetable, old_buf, oldpath, MAXPATH) < 0 ||
+       copyinstr(p->pagetable, new_buf, newpath, MAXPATH) < 0) {
+        return -1;
+    }
+
+    if((ip = namei(old_buf)) == 0) return -1; 
+
+    ivalid(ip);
+    if(ip->type == T_DIR) {
+        iunlockput(ip);
+        return -1;
+    }
+
+    ip->nlink++; 
+    iupdate(ip); 
+    //iunlock(ip);
+
+    if((dp = nameiparent(new_buf, name)) == 0) goto rollback;
+
+    ivalid(dp);
+    if(dirlink(dp, name, ip->inum) < 0) {
+        iunlockput(dp);
+        goto rollback;
+    }
+
+    iunlockput(dp);
+    iput(ip);
+    return 0; 
+
+rollback:
+    ivalid(ip);
+    ip->nlink--;
+    iupdate(ip);
+    iunlockput(ip);
+	if (dp) {
+		iunlockput(dp);
+	}
+    return -1;
 }
 
 int sys_unlinkat(int dirfd, uint64 name, uint64 flags){
 	//TODO: your job is to complete the syscall
-	return -1;
+struct inode *ip, *dp;
+    char name_buf[DIRSIZ];
+    char path_buf[MAXPATH];
+    struct proc *p = curr_proc();
+    uint off; // This will store the entry's location [cite: 40]
+
+    if(copyinstr(p->pagetable, path_buf, name, MAXPATH) < 0) return -1;
+
+    if((dp = nameiparent(path_buf, name_buf)) == 0) return -1;
+    ivalid(dp);
+
+    // Find the inode AND its offset in the parent directory
+    if((ip = dirlookup(dp, name_buf, &off)) == 0) { 
+        iput(dp);
+        return -1; // File does not exist [cite: 55]
+    }
+    ivalid(ip);
+
+    // Standard UNIX: cannot unlink directories with unlinkat
+    if(ip->type == T_DIR) {
+        iunlockput(ip);
+        iunlockput(dp);
+        return -1;
+    }
+
+    // Zero out the directory entry at the correct offset
+    struct dirent de;
+    memset(&de, 0, sizeof(de));
+    if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de)) 
+        panic("unlink: writei");
+    
+    iupdate(dp);
+    iunlockput(dp);
+
+    // Decrement link count and update disk [cite: 51, 83]
+    if(ip->nlink > 0) {
+        ip->nlink--; 
+    }
+    iupdate(ip);
+    iunlockput(ip); // This must trigger deletion in fs.c if nlink == 0 [cite: 85, 86]
+
+    return 0;
 }
 
 extern char trap_page[];
@@ -247,13 +371,70 @@ void syscall()
 		break;
 	case SYS_unlinkat:
 	    ret = sys_unlinkat(args[0],args[1],args[2]);
+		break;
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
 		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
+		break;	
+	case 215: // sys_munmap
+        ret = sys_munmap(args[0], args[1]);
+        break;
+    case 222: // sys_mmap
+        ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+        break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
 	}
 	trapframe->a0 = ret;
 	tracef("syscall ret %d", ret);
+}
+
+uint64 sys_munmap(uint64 start, uint64 len) {
+    if (len == 0) return 0;
+    if (start % PAGE_SIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    uint64 end = PGROUNDUP(start + len);
+
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        if (walkaddr(p->pagetable, va) == 0) return -1;
+    }
+
+    uint64 npages = (end - start) / PAGE_SIZE;
+    uvmunmap(p->pagetable, start, npages, 1); 
+    
+    return 0;
+}
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd) {
+    if (len == 0) return 0;
+    if (len > 1024 * 1024 * 1024) return -1;
+    if ((port & ~0x7) != 0 || (port & 0x7) == 0) return -1;
+    if (start % PAGE_SIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    uint64 end = PGROUNDUP(start + len);
+
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        if (walkaddr(p->pagetable, va) != 0) return -1;
+    }
+
+    int pte_flags = PTE_U | (port << 1); 
+    for (uint64 va = start; va < end; va += PAGE_SIZE) {
+        void *pa = kalloc();
+        if (pa == 0) {
+            sys_munmap(start, va - start);
+            return -1;
+        }
+        memset(pa, 0, PAGE_SIZE);
+        if (mappages(p->pagetable, va, PAGE_SIZE, (uint64)pa, pte_flags) != 0) {
+            kfree(pa);
+            sys_munmap(start, va - start);
+            return -1;
+        }
+    }
+    return 0;
 }
