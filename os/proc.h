@@ -66,6 +66,10 @@ struct proc {
 	// LAB5: (1) Define your variables for deadlock detect here.
 	//			 You may need a flag to record if detection enabled,
 	//       and some arrays for detection algorithm.
+	int deadlock_detect_enabled; // [cite: 56]
+    int available_res[LOCK_POOL_SIZE * 2]; // [cite: 46]
+    int allocation[NTHREAD][LOCK_POOL_SIZE * 2]; // [cite: 46]
+    int request[NTHREAD][LOCK_POOL_SIZE * 2]; // [cite: 46]
 };
 
 int cpuid();
