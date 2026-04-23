@@ -317,7 +317,7 @@ void exit(int code)
 	// orphan handling
 	sched();
 }
-
+// makes a child and loads target program directly into it - helper function for sys_spawn
 int spawn(char *name)
 {
     int id = get_id_by_name(name); 
