@@ -195,6 +195,8 @@ void rsect(uint sec, void *buf)
 		exit(1);
 	}
 }
+// code runs on host machine to build initial file system image
+// ensures when filesystem first created,every file starts with a link count of 1, which means it has at least one name (the one just created) to exist. [cite: 50, 51]
 
 uint ialloc(ushort type)
 {
@@ -205,6 +207,7 @@ uint ialloc(ushort type)
 	din.type = xshort(type);
 	din.size = xint(0);
 	// LAB4: You may want to init link count here
+	// A file must have at least one name (the one just created) to exist.
 	din.nlink = xshort(1);
 	winode(inum, &din);
 	return inum;

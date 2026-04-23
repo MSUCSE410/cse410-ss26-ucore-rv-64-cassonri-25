@@ -9,13 +9,15 @@
 #define FILEPOOLSIZE (NPROC * FD_BUFFER_SIZE)
 
 // in-memory copy of an inode,it can be used to quickly locate file entities on disk
+// This is the kernel's active cache of an inode. When a file is open, the kernel refers to this structure.
 struct inode {
 	uint dev; // Device number
 	uint inum; // Inode number
-	int ref; // Reference count
-	int valid; // inode has been read from disk?
-	short type; // copy of disk inode
-	short nlink; // Number of links to inode in file system
+	int ref; // Reference count - pointer count currently looking at that inode;kernel only counter
+	int valid; // inode has been read from disk - true if so and filled structure with real disk data
+	short type; // copy of disk inode - directory or file; what functions can be called on that inode
+	// add nlink here so the kernel can increment/decrement it quickly without always hitting the disk.
+	short nlink; // Number of links to inode in file system/Copy of disk link count
 	uint size;
 	uint addrs[NDIRECT + 1];
 	// LAB4: You may need to add link count here

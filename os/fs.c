@@ -129,6 +129,8 @@ struct inode *ialloc(uint dev, short type)
 // Copy a modified in-memory inode to disk.
 // Must be called after every change to an ip->xxx field
 // that lives on disk.
+// These functions act as the bridge between the disk (dinode) and memory (inode).
+// If you forget to update nlink here, your link changes will be "lost" when the inode is evicted from cache.
 void iupdate(struct inode *ip)
 {
 	struct buf *bp;
@@ -138,11 +140,12 @@ void iupdate(struct inode *ip)
 	dip = (struct dinode *)bp->data + ip->inum % IPB;
 	dip->type = ip->type;
 	// LAB4: you may need to update link count here
+	// Sync the link count to disk so the change is permanent
 	dip->nlink = (short)ip->nlink;
 	dip->size = ip->size;
 	memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
-	bwrite(bp);
-	brelse(bp);
+	bwrite(bp); // Write changes back to disk
+	brelse(bp); // Release disk buffer
 }
 
 // Find the inode with number inum on device dev
@@ -187,10 +190,11 @@ void ivalid(struct inode *ip)
 {
 	struct buf *bp;
 	struct dinode *dip;
-	if (ip->valid == 0) {
+	if (ip->valid == 0) { // Only read if the memory copy is stale
 		bp = bread(ip->dev, IBLOCK(ip->inum, sb));
 		dip = (struct dinode *)bp->data + ip->inum % IPB;
 		ip->type = dip->type;
+		// Load the link count from disk into the kernel's memory structure
 		ip->nlink = (int)dip->nlink;
 		ip->size = dip->size;
 		// LAB4: You may need to get lint count here
@@ -211,19 +215,25 @@ void ivalid(struct inode *ip)
 // to it, free the inode (and its content) on disk.
 // All calls to iput() must be inside a transaction in
 // case it has to free the inode.
+// iput decides if a file should be deleted.
 void iput(struct inode *ip)
 {
 	// LAB4: Unmark the condition and change link count variable name (nlink) if needed
 	// if (ip->ref == 1 && ip->valid && ip->nlink == 0) {
-// If this is the last reference and no hard links exist, delete it [cite: 51, 85]
+	// If this is the last reference and no hard links exist, delete it [cite: 51, 85]
+	// The "Garbage Collector" logic.
+    // If this is the LAST process using the inode (ref == 1) 
+    // AND the file has no names left on disk (nlink == 0)
     if (ip->ref == 1 && ip->valid && ip->nlink == 0) {
-        itrunc(ip);      // Free data blocks [cite: 85]
-        ip->type = 0;    // Mark inode as free [cite: 85]
-        iupdate(ip);     // Synchronize to disk [cite: 86]
-        ip->valid = 0;
+        itrunc(ip);      // Free data blocks used by the file
+        ip->type = 0;    // Mark inode as free in the disk table
+        iupdate(ip);     // Synchronize to disk by writing the free status there
+        ip->valid = 0;   // invalidate the memory cache
     }
+	// Decrement the reference count (number of users)
     ip->ref--;
-
+	// If no one is using the in-memory cache at all, mark it invalid
+    // so it can be recycled for a different file later.
     if (ip->ref == 0) {
         ip->valid = 0;
     }
@@ -457,9 +467,11 @@ int dirlink(struct inode *dp, char *name, uint inum)
 }
 
 // LAB4: You may want to add dirunlink here
+// the helper used to remove a name from a directory inode.
 int dirunlink(struct inode *dp, uint off) {
     struct dirent de;
-    memset(&de, 0, sizeof(de));
+    memset(&de, 0, sizeof(de)); // Create an empty directory entry
+	// Write the empty entry (inum = 0) over the old entry at 'off'
     if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
         return -1;
     return 0;

@@ -201,27 +201,30 @@ uint64 sys_close(int fd)
 	p->files[fd] = 0;
 	return 0;
 }
-
+// Purpose: Retrieves metadata about an open file. This is how the user-space program verifies that nlink increased after a linkat call.
 int sys_fstat(int fd,uint64 stat){
 	//TODO: your job is to complete the syscall
 	struct file *f;
     struct proc *p = curr_proc();
     Stat st;
-
+	// 1. Verify file descriptor is valid and belongs to the current process
     if(fd < 0 || fd >= NFILE || (f = p->files[fd]) == 0) return -1;
-
+	// 2. Ensure the in-memory inode has the freshest data from disk
     ivalid(f->ip); // Use ivalid instead of ilock
+	// 3. Populate the Stat structure with metadata from the inode
     st.dev = 0;
     st.ino = f->ip->inum;
-    st.nlink = f->ip->nlink;
+    st.nlink = f->ip->nlink; //Report current link count
 	st.size = f->ip->size;
+	// 4. Set mode bits (Standard bits for ucore tests)
     st.mode = (f->ip->type == T_DIR) ? 0x040000 : 0x100000;
     //iunlock(f->ip);
-
+	// 5. Copy the results from kernel space back to user space memory
     if(copyout(p->pagetable, stat, (char *)&st, sizeof(st)) < 0) return -1;
     return 0;
 }
 
+//Purpose: Creates a "Hard Link." It gives an existing file (inode) a new name in a directory, effectively increasing its nlink count.
 int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint64 flags){
 	//TODO: your job is to complete the syscall
 	char old_buf[MAXPATH], new_buf[MAXPATH]; // Use unique names for local buffers
@@ -230,36 +233,39 @@ int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint6
     struct proc *p = curr_proc();
 
     // Use the 'oldpath' and 'newpath' parameters directly [cite: 20, 21]
+	// 1. Copy paths from user-space into kernel buffers(using provided addresses)
     if(copyinstr(p->pagetable, old_buf, oldpath, MAXPATH) < 0 ||
        copyinstr(p->pagetable, new_buf, newpath, MAXPATH) < 0) {
         return -1;
     }
-
+	// 2. Locate the existing file (the "old" file)
     if((ip = namei(old_buf)) == 0) return -1; 
-
+	// 3. Basic Safety: UNIX does not typically allow hard links to directories
     ivalid(ip);
     if(ip->type == T_DIR) {
         iunlockput(ip);
         return -1;
     }
-
+	// 4. Increment link count and sync to disk immediately
+    // If the system crashes now, the file just has an "extra" link that will be cleaned later
     ip->nlink++; 
     iupdate(ip); 
     //iunlock(ip);
-
+	// 5. Find the parent directory for the "new" link name
     if((dp = nameiparent(new_buf, name)) == 0) goto rollback;
-
+	// 6. Add the new entry to the parent directory pointing to the old inode
     ivalid(dp);
     if(dirlink(dp, name, ip->inum) < 0) {
         iunlockput(dp);
         goto rollback;
     }
-
+	// 7. Cleanup: Release the directory and the inode reference (namei gave us 1 ref)
     iunlockput(dp);
     iput(ip);
     return 0; 
 
 rollback:
+	// If directory entry creation failed, we MUST undo the nlink increment
     ivalid(ip);
     ip->nlink--;
     iupdate(ip);
@@ -269,21 +275,23 @@ rollback:
 	}
     return -1;
 }
-
+// Purpose: Removes a name (link) from a directory. If this was the last name (nlink == 0) and no processes are using the file, iput will trigger the actual deletion.
 int sys_unlinkat(int dirfd, uint64 name, uint64 flags){
 	//TODO: your job is to complete the syscall
 struct inode *ip, *dp;
     char name_buf[DIRSIZ];
     char path_buf[MAXPATH];
     struct proc *p = curr_proc();
+	// Stores the byte offset of the directory entry we are removing
     uint off; // This will store the entry's location [cite: 40]
-
+	// 1. Copy the path to the file being unlinked
     if(copyinstr(p->pagetable, path_buf, name, MAXPATH) < 0) return -1;
-
+	// 2. Find the parent directory containing the file
     if((dp = nameiparent(path_buf, name_buf)) == 0) return -1;
     ivalid(dp);
 
     // Find the inode AND its offset in the parent directory
+	// 3. Find the file's inode and, critically, its 'off' (position) in the directory
     if((ip = dirlookup(dp, name_buf, &off)) == 0) { 
         iput(dp);
         return -1; // File does not exist [cite: 55]
@@ -291,6 +299,7 @@ struct inode *ip, *dp;
     ivalid(ip);
 
     // Standard UNIX: cannot unlink directories with unlinkat
+	// 4. Safety: Standard unlink cannot remove directories (use rmdir for that)
     if(ip->type == T_DIR) {
         iunlockput(ip);
         iunlockput(dp);
@@ -298,19 +307,24 @@ struct inode *ip, *dp;
     }
 
     // Zero out the directory entry at the correct offset
+	// 5. Remove the name from the parent directory by zeroing the entry at 'off'
     struct dirent de;
     memset(&de, 0, sizeof(de));
     if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de)) 
         panic("unlink: writei");
-    
+    // 6. Update the directory's metadata and release it
     iupdate(dp);
     iunlockput(dp);
 
     // Decrement link count and update disk [cite: 51, 83]
+	// 7. Decrement the link count of the file itself
     if(ip->nlink > 0) {
         ip->nlink--; 
     }
+	// 8. Sync the new link count to disk
     iupdate(ip);
+	// 9. Drop the reference. If ip->nlink is now 0, iput() in fs.c 
+    // will see this and finally free the disk blocks (itrunc).
     iunlockput(ip); // This must trigger deletion in fs.c if nlink == 0 [cite: 85, 86]
 
     return 0;
