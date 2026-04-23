@@ -47,6 +47,7 @@ struct thread {
 enum procstate { P_UNUSED, P_USED, ZOMBIE };
 
 // Per-process state
+// This structure defines the data the kernel maintains for every process, including the new matrices for deadlock tracking.
 struct proc {
 	enum procstate state; // Process state
 	int pid; // Process ID
@@ -66,9 +67,14 @@ struct proc {
 	// LAB5: (1) Define your variables for deadlock detect here.
 	//			 You may need a flag to record if detection enabled,
 	//       and some arrays for detection algorithm.
+	// Flag to toggle detection - enables deadlock detect
 	int deadlock_detect_enabled; // [cite: 56]
+	// Tracking matrices for the safety algorithm [cite: 46]
+    // available_res: Current free count for each resource type
     int available_res[LOCK_POOL_SIZE * 2]; // [cite: 46]
+	// allocation: tracks Resources currently held by each thread
     int allocation[NTHREAD][LOCK_POOL_SIZE * 2]; // [cite: 46]
+	// request: tracks Resources currently requested by each thread
     int request[NTHREAD][LOCK_POOL_SIZE * 2]; // [cite: 46]
 };
 

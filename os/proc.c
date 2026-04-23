@@ -120,6 +120,8 @@ void add_task(struct thread *t)
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel.
 // If there are no free procs, or a memory allocation fails, return 0.
+// Process Allocation and Initialization
+// This function handles the creation of a new process and initializes its deadlock detection state.
 struct proc *allocproc()
 {
 	struct proc *p;
@@ -132,6 +134,7 @@ struct proc *allocproc()
 
 found:
 	// init proc
+	// Initialize standard process metadata
 	p->pid = allocpid();
 	p->state = P_USED;
 	p->max_page = 0;
@@ -143,7 +146,9 @@ found:
 	p->next_semaphore_id = 0;
 	p->next_condvar_id = 0;
 	// LAB5: (1) you may initialize your new proc variables here
+	// Detection is disabled by default
 	p->deadlock_detect_enabled = 0; // [cite: 56]
+	// Clear tracking arrays for available resources, allocations, and requests [cite: 46]
 	memset(p->available_res, 0, sizeof(p->available_res));
 	memset(p->allocation, 0, sizeof(p->allocation));
 	memset(p->request, 0, sizeof(p->request));

@@ -250,15 +250,19 @@ int sys_waittid(int tid)
 *				for both mutex and semaphore detect, you can also
 *				use this idea or just ignore it.
 */
+// This section implements the safety algorithm and the system calls for mutexes and semaphores.
+// deadlock - when a group of threads are stuck in a permanent wait because every thread in group is waiting for resource held by another thread in the group [cite: 183, 187]
+// runs a simulation where if allows current request for something it checks if it would cause a system deadlock
+// if deadlock detected, action is not allowed
 int deadlock_detect(const int available[LOCK_POOL_SIZE * 2],
                     const int allocation[NTHREAD][LOCK_POOL_SIZE * 2],
                     const int request[NTHREAD][LOCK_POOL_SIZE * 2]) {
-    int work[LOCK_POOL_SIZE * 2];
-    int finish[NTHREAD] = {0};
+    int work[LOCK_POOL_SIZE * 2]; // Temporary array for available resources
+    int finish[NTHREAD] = {0};    // Tracks threads that could potentially complete
     int total_res = LOCK_POOL_SIZE * 2; 
-
+	// Initialize work with currently available resources
     for(int i = 0; i < total_res; i++) work[i] = available[i];
-
+	// Mark threads as "finished" if they have no active resource interaction
     for(int i = 0; i < NTHREAD; i++) {
         int has_active = 0;
         for(int j = 0; j < total_res; j++) {
@@ -270,18 +274,20 @@ int deadlock_detect(const int available[LOCK_POOL_SIZE * 2],
         // If a thread has no interaction with resources, it's "finished" 
         if(!has_active) finish[i] = 1;
     }
-
+	// Main Safety Algorithm loop: simulate resource allocation
     while(1) {
         int found = 0;
         for(int i = 0; i < NTHREAD; i++) {
             if(!finish[i]) {
                 int can_finish = 1;
+				// Check if current thread's requests can be met by available work
                 for(int j = 0; j < total_res; j++) {
                     if(request[i][j] > work[j]) {
                         can_finish = 0;
                         break;
                     }
                 }
+				// If thread can finish, release its current allocations back to work
                 if(can_finish) {
                     for(int j = 0; j < total_res; j++)
                         work[j] += allocation[i][j];
@@ -290,15 +296,17 @@ int deadlock_detect(const int available[LOCK_POOL_SIZE * 2],
                 }
             }
         }
-        if(!found) break;
+        if(!found) break; // Exit loop if no more threads can be finished
     }
-
+	// If any active thread remains unfinished, a deadlock exists [cite: 183, 187]
     for(int i = 0; i < NTHREAD; i++) {
         if(!finish[i]) return 1; // Deadlock exists [cite: 183, 187]
     }
-    return 0;
+    return 0; // State is safe
 }
-
+// System call to create a mutex [cite: 87]
+// mutex-manages access to critical section of the code;process must request mutex
+//critical section - accesses a shared resource and must not be accesssed by more than one thread simultaneously
 int sys_mutex_create(int blocking)
 {
 	struct proc *p = curr_proc();
@@ -308,12 +316,14 @@ int sys_mutex_create(int blocking)
         return -1;
     }
 	// LAB5: (4-1) You may want to maintain some variables for detect here
+	// Calculate ID and update availability for detection logic [cite: 101]
 	int mutex_id = m - p->mutex_pool;
-    p->available_res[mutex_id] = 1;
+    p->available_res[mutex_id] = 1; // Mutexes have 1 unit available initially
     debugf("create mutex %d", mutex_id);
     return mutex_id;
 }
-
+// System call to acquire a mutex [cite: 111]
+// records that a thread wants the lock-wants access to critical area
 int sys_mutex_lock(int mutex_id)
 // LAB5: (4-1) Record that this thread is now requesting the mutex
 // LAB5: (4-1) You may want to maintain some variables for detect
@@ -322,50 +332,60 @@ int sys_mutex_lock(int mutex_id)
 	struct proc *p = curr_proc();
     int tid = curr_thread()->tid;
     if (mutex_id < 0 || mutex_id >= p->next_mutex_id) return -1;
-
+	//if thread requests lock, run deadlock detect
+	// Proactively check for deadlock before blocking the thread [cite: 121]
     if (p->deadlock_detect_enabled) {
-        p->request[tid][mutex_id] = 1;
+        p->request[tid][mutex_id] = 1; // Mark request
+		//if deadlock found
         if (deadlock_detect(p->available_res, p->allocation, p->request)) {
+			// Report and prevent the deadlock by failing the call [cite: 187]
             printf("ERROR %d-%ddetect deadlock on locking mutex %d!\n", p->pid, tid, mutex_id);
             p->request[tid][mutex_id] = 0;
-            return -0xDEAD;
+			//when deadlock is found, returns this
+            return -0xDEAD; // Special error value for user-level tests
         }
     }
-
+	// Attempt to acquire the actual kernel mutex [cite: 125]
+	// if theres no deadlock
     mutex_lock(&p->mutex_pool[mutex_id]);
-
+	// Success: Update detection matrices to reflect ownership
     p->request[tid][mutex_id] = 0;
     p->allocation[tid][mutex_id] = 1;
     p->available_res[mutex_id] = 0;
     return 0;
 }
-
+// System call to release a mutex [cite: 133]
+//takes away lock from that process
+// resets the tracker,meaning mutex is available
 int sys_mutex_unlock(int mutex_id)
 {
 	// LAB5: (4-1) You may want to maintain some variables for detect here
 	struct proc *p = curr_proc();
     int tid = curr_thread()->tid;
     if (mutex_id < 0 || mutex_id >= p->next_mutex_id) return -1;
-
+	// Update detection state: mutex is free and no longer allocated to this thread [cite: 144]
     p->allocation[tid][mutex_id] = 0;
     p->available_res[mutex_id] = 1;
-    mutex_unlock(&p->mutex_pool[mutex_id]);
+    mutex_unlock(&p->mutex_pool[mutex_id]); // Release kernel mutex
     return 0;
 }
-
+// System call to create a semaphore [cite: 151]
+// semaphore - maintains counter to control access to pool of shared resources
 int sys_semaphore_create(int res_count)
 {
 	// LAB5: (4-2) You may want to maintain some variables for detect here
 	struct proc *p = curr_proc();
-    struct semaphore *s = semaphore_create(res_count);
+    struct semaphore *s = semaphore_create(res_count); // Initialize kernel semaphore
     if (s == NULL) return -1;
     
     int sem_id = s - p->semaphore_pool;
     // Store the count in our tracking array
+	// Map semaphore ID to detection array using offset [cite: 169]
     p->available_res[sem_id + LOCK_POOL_SIZE] = res_count; 
     return sem_id;
 }
-
+// System call to release semaphore resources [cite: 174]
+//thread is done using resource and releases it back to the system, allowing other threads to acquire it
 int sys_semaphore_up(int semaphore_id)
 {
 	// LAB5: (4-2) You may want to maintain some variables for detect here
@@ -373,40 +393,46 @@ int sys_semaphore_up(int semaphore_id)
     int tid = curr_thread()->tid;
     int idx = semaphore_id + LOCK_POOL_SIZE; 
     if (semaphore_id < 0 || semaphore_id >= p->next_semaphore_id) return -1;
-
+	// Update state: Release allocation and increment availability
     if (p->allocation[tid][idx] > 0) p->allocation[tid][idx]--;
+	//one more resource becomes available when up is called
     p->available_res[idx]++;
     semaphore_up(&p->semaphore_pool[semaphore_id]); 
     return 0;
 }
-
+// System call to acquire semaphore resources [cite: 177]
+// checks if taking a resource causes a deadlock;if safe, gives resource to thread that needs it
 int sys_semaphore_down(int semaphore_id)
 {
 	// LAB5: (4-2) You may want to maintain some variables for detect
 	//       or call your detect algorithm here
 	struct proc *p = curr_proc();
     int tid = curr_thread()->tid;
+	// Use offset to track semaphores
     int idx = semaphore_id + LOCK_POOL_SIZE; // Map to the second half of the resource array
     
     if (semaphore_id < 0 || semaphore_id >= p->next_semaphore_id) return -1;
-
+	// Check for potential circular wait [cite: 175]
     if (p->deadlock_detect_enabled) {
         // Step 1: Tentatively mark the request
-        p->request[tid][idx] = 1; 
+        p->request[tid][idx] = 1; // Log resource request
 
         // Step 2: Check if this request creates a deadlock
         if (deadlock_detect(p->available_res, p->allocation, p->request)) {
             // Step 3: Print EXACT error format: ERROR pid-tiddetect...
+			// Report deadlock according to required format [cite: 183]
             printf("ERROR %d-%ddetect deadlock on down semaphore %d!\n", p->pid, tid, semaphore_id);
             p->request[tid][idx] = 0; // Clear request because we are failing the call
-            return -0xDEAD; // Return -1 to user-space as required [cite: 183]
+            return -0xDEAD; // Fail call to avoid indefinite block
         }
     }
 
     // Step 4: If no deadlock, proceed to block if necessary
+	// Call kernel semaphore down (blocking)
     semaphore_down(&p->semaphore_pool[semaphore_id]);
 
     // Step 5: Once acquired, move from request to allocation
+	// Update state once resource is successfully obtained
     p->request[tid][idx] = 0;
     p->allocation[tid][idx]++;
     p->available_res[idx]--;
@@ -451,6 +477,7 @@ int sys_condvar_wait(int cond_id, int mutex_id)
 }
 
 // LAB5: (2) you may need to define function enable_deadlock_detect here
+// Toggle deadlock detection for the process [cite: 57]
 uint64 sys_enable_deadlock_detect(int enabled) {
     curr_proc()->deadlock_detect_enabled = enabled; 
     return 0;
