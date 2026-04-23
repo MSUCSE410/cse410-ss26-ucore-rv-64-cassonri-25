@@ -45,9 +45,9 @@ struct proc {
 	struct proc *parent; // Parent process
 	uint64 exit_code;
 	struct file *files[FD_BUFFER_SIZE];
-	uint64 priority;
-	uint64 stride;
-	uint64 pass;
+	uint64 priority; // priority of the process, used for stride scheduling
+	uint64 stride; //dynamic value that track total distance process has traveled while running on the cpu
+	uint64 pass; //stride length - amount of progress the process has made in a single time slice
 };
 
 int cpuid();

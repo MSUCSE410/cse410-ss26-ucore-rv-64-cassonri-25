@@ -96,7 +96,7 @@ uint64 sys_wait(int pid, uint64 va)
 }
 // creates a new process
 // equivalent to fork + exec, but slightly more optimal due to it not copying a memory space just to immedietly delete it
-// creates a new child process and executes the target program
+// creates a new child process and executes the target program directly into it
 // returns process ID of the child is succesful, otherwise -1
 // atomic 
 uint64 sys_spawn(uint64 va)
@@ -112,17 +112,21 @@ uint64 sys_spawn(uint64 va)
 }
 // sets process priority
 // allows a user-space program to influence the scheduler
-// returns process id of the child if succesful
+// returns new priority
+// allows process to change its priority which will calculate the new pass value
 uint64 sys_set_priority(long long prio){
     // TODO: your job is to complete the sys call
 	// the validation
 	// if priorities less than 2 could cause pass values that are too large or lead to division by 0 errors
+	// higher priority = lower pass, so more likely for process to be selected by the scheduler
 	if (prio < 2) return -1;
 	struct proc *p = curr_proc();
 	p->priority = prio;
 	// this is the dynamic update:
 	// we need to recalculate the pass value immediately so the process
 	// will start to receive the new "fair share" of the CPU immedietly
+	// dividing by priority - larger priority means smaller pass, so more likely to be scheduled
+	// scheduler chooses process with lowest stride to run next - smaller pass means less progress, lower stride,more likely to be chosen by scheduler
 	p->pass = (uint64)(0x1000000000000000L / prio);	
 	return prio;	
 }

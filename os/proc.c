@@ -322,10 +322,10 @@ int spawn(char *name)
 {
     int id = get_id_by_name(name); 
     if (id < 0) return -1; 
-
+	// helper function calls allocproc to reserve a slot in the process pool 
     struct proc *np = allocproc(); 
     if (np == 0) return -1; 
-
+	//call loader to load the program binary into memory
     loader(id, np); 
     np->parent = curr_proc(); 
     np->state = RUNNABLE;
